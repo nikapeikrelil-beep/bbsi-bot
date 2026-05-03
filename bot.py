@@ -13,7 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ════════════ ДАННЫЕ ════════════
-BOT_TOKEN = "8523252259:AAEZ9bCyDpax61C5IPIx88c2NeKCQ3q-DQ8"
+BOT_TOKEN = "8523252259:AAGyaBfAvdBen6wDesxBn-WqZcM26Eyus1I"
 GROUP_REQUESTS = -1003988760349
 GROUP_RULES = -1003934127071
 GROUP_MAIN = -1003938419933
