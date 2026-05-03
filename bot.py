@@ -1,56 +1,36 @@
 import asyncio
 import sqlite3
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from aiogram.enums import ParseMode, ChatMemberStatus
+from aiogram.enums import ParseMode, ChatType
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# ════════════ ТВОИ ДАННЫЕ ════════════
+# ════════════ ДАННЫЕ ════════════
 BOT_TOKEN = "8523252259:AAGShQCJzPfJZGNojgQ9r3w7G6CwcUrBz9E"
 GROUP_REQUESTS = -1003988760349
 GROUP_RULES = -1003934127071
 GROUP_MAIN = -1003938419933
 ADMIN_GROUP = -1003944645878
-SUPREME_ADMIN = 7440989311
-ADMIN_LEVELS = {7440989311: 3}
-
-# Уровни админов: {user_id: уровень}
-# 1 - младший админ, 2 - старший, 3 - верховный (ты)
-ADMIN_LEVELS = {7440989311: 3}
-
-# Авто-банк: True = бот сам банит, False = спрашивает тебя
-AUTO_BAN = False  # Поменяй на True когда захочешь автобаны
+ADMIN_IDS = [7440989311]
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
-# ════════════ БАЗА ДАННЫХ ════════════
+# ════════════ БД ════════════
 def init_db():
     conn = sqlite3.connect('empire.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT,
         birth_date TEXT, phone TEXT, country TEXT, city TEXT,
-        gender TEXT, level INTEGER DEFAULT 1, xp INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'new', rules_accepted INTEGER DEFAULT 0,
-        language TEXT DEFAULT 'RU', join_date TEXT,
-        admin_level INTEGER DEFAULT 0, warnings INTEGER DEFAULT 0,
-        banned INTEGER DEFAULT 0, ban_reason TEXT
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS violations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER, type TEXT, article TEXT,
-        chat_id INTEGER, auto_action TEXT, timestamp TEXT
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS blacklist (
-        user_id INTEGER PRIMARY KEY, username TEXT,
-        reason TEXT, banned_by INTEGER, ban_date TEXT
+        gender TEXT, status TEXT DEFAULT 'new', rules_accepted INTEGER DEFAULT 0,
+        warnings INTEGER DEFAULT 0, banned INTEGER DEFAULT 0, ban_reason TEXT
     )''')
     conn.commit()
     conn.close()
@@ -75,123 +55,37 @@ def update_user(uid, **kw):
 def add_user(uid, uname, fname):
     conn = sqlite3.connect('empire.db')
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id, username, full_name, join_date) VALUES (?, ?, ?, ?)",
-              (uid, uname, fname, datetime.now().isoformat()))
+    c.execute("INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?, ?, ?)", (uid, uname, fname))
     conn.commit()
     conn.close()
-
-def add_violation(uid, vtype, article, chat_id, action=""):
-    conn = sqlite3.connect('empire.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO violations (user_id, type, article, chat_id, auto_action, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-              (uid, vtype, article, chat_id, action, datetime.now().isoformat()))
-    # Увеличиваем счётчик предупреждений
-    c.execute("UPDATE users SET warnings = warnings + 1 WHERE user_id=?", (uid,))
-    conn.commit()
-    conn.close()
-    return get_warnings(uid)
-
-def get_warnings(uid):
-    conn = sqlite3.connect('empire.db')
-    c = conn.cursor()
-    c.execute("SELECT warnings FROM users WHERE user_id=?", (uid,))
-    r = c.fetchone()
-    conn.close()
-    return r[0] if r else 0
 
 def is_banned(uid):
     conn = sqlite3.connect('empire.db')
     c = conn.cursor()
-    c.execute("SELECT * FROM blacklist WHERE user_id=?", (uid,))
+    c.execute("SELECT banned FROM users WHERE user_id=?", (uid,))
     r = c.fetchone()
     conn.close()
-    return r is not None
+    return r and r[0] == 1
 
-def ban_user(uid, reason, banned_by):
+def get_pending_count():
     conn = sqlite3.connect('empire.db')
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO blacklist (user_id, username, reason, banned_by, ban_date) VALUES (?, ?, ?, ?, ?)",
-              (uid, f"user_{uid}", reason, banned_by, datetime.now().isoformat()))
-    c.execute("UPDATE users SET banned=1, ban_reason=? WHERE user_id=?", (reason, uid))
-    conn.commit()
+    c.execute("SELECT COUNT(*) FROM users WHERE status='pending'")
+    r = c.fetchone()[0]
     conn.close()
-
-def unban_user(uid):
-    conn = sqlite3.connect('empire.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM blacklist WHERE user_id=?", (uid,))
-    c.execute("UPDATE users SET banned=0, ban_reason=NULL, warnings=0 WHERE user_id=?", (uid,))
-    conn.commit()
-    conn.close()
-
-def get_admin_level(uid):
-    return ADMIN_LEVELS.get(uid, 0)
-
-# ════════════ ЯЗЫКИ ════════════
-ALL_LANGUAGES = {
-    "RU": "🇷🇺 Русский", "EN": "🇬🇧 English", "DE": "🇩🇪 Deutsch",
-    "FR": "🇫🇷 Français", "ES": "🇪🇸 Español", "IT": "🇮🇹 Italiano",
-    "PT": "🇵🇹 Português", "PL": "🇵🇱 Polski", "UA": "🇺🇦 Українська",
-    "CS": "🇨🇿 Čeština", "HU": "🇭🇺 Magyar", "RO": "🇷🇴 Română",
-    "BG": "🇧🇬 Български", "SR": "🇷🇸 Српски", "HR": "🇭🇷 Hrvatski",
-    "SQ": "🇦🇱 Shqip", "EL": "🇬🇷 Ελληνικά", "SV": "🇸🇪 Svenska",
-    "DA": "🇩🇰 Dansk", "NO": "🇳🇴 Norsk", "FI": "🇫🇮 Suomi",
-    "ET": "🇪🇪 Eesti", "LV": "🇱🇻 Latviešu", "LT": "🇱🇹 Lietuvių",
-    "ZH": "🇨🇳 中文", "JA": "🇯🇵 日本語", "KO": "🇰🇷 한국어",
-    "HI": "🇮🇳 हिन्दी", "BN": "🇧🇩 বাংলা", "UR": "🇵🇰 اردو",
-    "AR": "🇸🇦 العربية", "HE": "🇮🇱 עברית", "FA": "🇮🇷 فارسی",
-    "TR": "🇹🇷 Türkçe", "TH": "🇹🇭 ไทย", "VI": "🇻🇳 Tiếng Việt",
-    "ID": "🇮🇩 Indonesia", "TL": "🇵🇭 Tagalog",
-    "KA": "🇬🇪 ქართული", "HY": "🇦🇲 Հայերեն", "AZ": "🇦🇿 Azərbaycan",
-    "KK": "🇰🇿 Қазақша", "UZ": "🇺🇿 O'zbek", "KY": "🇰🇬 Кыргызча",
-    "SW": "🇹🇿 Kiswahili", "ZU": "🇿🇦 isiZulu", "AF": "🇿🇦 Afrikaans",
-    "AM": "🇪🇹 አማርኛ", "SO": "🇸🇴 Soomaali",
-    "TO": "🇹🇴 Faka-Tonga", "MI": "🇳🇿 Māori", "EO": "🟢 Esperanto",
-}
-
-RULES_TEXT = """
-⚖️ УГОЛОВНЫЙ КОДЕКС СООБЩЕСТВА
-
-Статья 12.3 — Скриншот чата. Пожизненный бан. 1M ⭐
-Статья 17.8 — Пересылка контента. Бан + $5000 нал.
-Статья 23.1 — Запись экрана. Вечный бан без амнистии.
-Статья 19.2 — Доксинг. Вечный бан. 25M ⭐
-Статья 15.1 — Оскорбление. Бан 1 месяц. 100K ⭐
-Статья 25.4 — Угрозы жизни. Вечный бан + полиция.
-Статья 27.1 — Слив интимных фото. Вечный бан + дело.
-Статья 34.9 — Шпионаж. GLOBAL BLACKLIST.
-Статья 35.2 — Слив БД. $100K или 1B ⭐
-Статья 30.0 — Уничтожение чата. $100K + суд.
-
-Всего 80 статей. При входе - принимаешь всё.
-"""
-
-class Reg(StatesGroup):
-    fio = State()
-    birth = State()
-    phone = State()
-    country = State()
-    city = State()
-    gender = State()
+    return r
 
 # ════════════ КЛАВИАТУРЫ ════════════
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Подать заявку", callback_data="apply")],
         [InlineKeyboardButton(text="📜 Правила", callback_data="rules")],
-        [InlineKeyboardButton(text="🌐 Язык", callback_data="lang")],
-    ])
-
-def admin_kb(uid):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ В правила", callback_data=f"acc_{uid}")],
-        [InlineKeyboardButton(text="⭐ В основную", callback_data=f"main_{uid}")],
-        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rej_{uid}")],
+        [InlineKeyboardButton(text="👑 Админ-панель", callback_data="apanel")],
     ])
 
 def rules_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ ПРИНИМАЮ ВСЕ СТАТЬИ", callback_data="accept_rules")],
+        [InlineKeyboardButton(text="✅ ПРИНИМАЮ ВСЕ СТАТЬИ УК", callback_data="accept_rules")],
     ])
 
 def gender_kb():
@@ -200,210 +94,165 @@ def gender_kb():
         [KeyboardButton(text="⚧ Другой")]
     ], resize_keyboard=True, one_time_keyboard=True)
 
-def violation_kb(uid, vtype):
-    """Клавиатура для админа при нарушении"""
+def request_buttons(uid):
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ ПРИНЯТЬ В ПРАВИЛА", callback_data=f"acc_{uid}")],
+        [InlineKeyboardButton(text="⭐ СРАЗУ В ЧАТ", callback_data=f"direct_{uid}")],
         [
-            InlineKeyboardButton(text="🔨 БАН", callback_data=f"vban_{uid}_{vtype}"),
-            InlineKeyboardButton(text="⚠️ Предупредить", callback_data=f"vwarn_{uid}_{vtype}")
+            InlineKeyboardButton(text="⏳ ОТЛОЖИТЬ", callback_data=f"hold_{uid}"),
+            InlineKeyboardButton(text="❌ ОТКЛОНИТЬ", callback_data=f"rej_{uid}")
         ],
         [
-            InlineKeyboardButton(text="👀 Игнорировать", callback_data=f"vignore_{uid}_{vtype}"),
-            InlineKeyboardButton(text="📊 Статистика", callback_data=f"vstats_{uid}")
+            InlineKeyboardButton(text="📋 АНКЕТА", callback_data=f"info_{uid}"),
+            InlineKeyboardButton(text="💬 НАПИСАТЬ", url=f"tg://user?id={uid}")
         ]
     ])
 
-def lang_kb(page=0):
-    langs = list(ALL_LANGUAGES.items())
-    per_page = 6
-    total = len(langs) // per_page + 1
-    start = page * per_page
-    kb = []
-    for code, name in langs[start:start+per_page]:
-        kb.append([InlineKeyboardButton(text=name, callback_data=f"setlang_{code}")])
-    nav = []
-    if page > 0: nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"langpg_{page-1}"))
-    nav.append(InlineKeyboardButton(text=f"{page+1}/{total}", callback_data="noop"))
-    if page < total - 1: nav.append(InlineKeyboardButton(text="➡️", callback_data=f"langpg_{page+1}"))
-    kb.append(nav)
-    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+def admin_approve_buttons(uid):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ ОДОБРИТЬ В ЧАТ", callback_data=f"appr_{uid}")],
+        [
+            InlineKeyboardButton(text="⏳ ПОДОЖДАТЬ", callback_data=f"wait_{uid}"),
+            InlineKeyboardButton(text="❌ ОТКАЗАТЬ", callback_data=f"deny_{uid}")
+        ],
+        [InlineKeyboardButton(text="📋 АНКЕТА", callback_data=f"info_{uid}")],
+    ])
 
-# ════════════ /start ════════════
-@dp.message(Command("start"))
+def admin_panel_kb():
+    pending = get_pending_count()
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📥 Заявки ({pending})", callback_data="apanel_requests")],
+        [InlineKeyboardButton(text="👤 Пользователи", callback_data="apanel_users")],
+        [InlineKeyboardButton(text="🔨 Забаненные", callback_data="apanel_banned")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="apanel_stats")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")],
+    ])
+
+def back_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="apanel")],
+    ])
+
+# ════════════ /start ТОЛЬКО В ЛИЧКЕ ════════════
+@dp.message(Command("start"), F.chat.type == ChatType.PRIVATE)
 async def start_cmd(message: types.Message):
     uid = message.from_user.id
     if is_banned(uid):
-        await message.answer("⛔ ВЫ ЗАБАНЕНЫ!\n\nДля аппеляции обратитесь к администратору.")
+        await message.answer("⛔ ВЫ ЗАБАНЕНЫ!")
         return
     user = get_user(uid)
     if not user:
         add_user(uid, message.from_user.username, message.from_user.full_name)
-    await message.answer(
-        "👋 ДОБРО ПОЖАЛОВАТЬ В THE EMPIRE!\n\n"
-        "⚖️ Уголовный Кодекс — 80 статей\n"
-        "💀 Слив = приговор\n\n"
-        "📝 Подайте заявку для вступления:",
-        reply_markup=main_kb()
-    )
+    await message.answer("👋 ДОБРО ПОЖАЛОВАТЬ В BBSI!\n\n⚖️ 80 статей УК\n💀 Слив = приговор", reply_markup=main_kb())
 
-# ════════════ АДМИН-КОМАНДЫ ════════════
-@dp.message(Command("ban"))
-async def cmd_ban(message: types.Message):
-    uid = message.from_user.id
-    if get_admin_level(uid) < 1:
-        await message.answer("⛔ Нет прав!")
-        return
-    
-    # Формат: /ban ID причина
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.answer("❌ Формат: /ban ID причина\nНапример: /ban 123456789 скриншот")
-        return
-    
-    target_id = int(parts[1])
-    reason = parts[2]
-    
-    ban_user(target_id, reason, uid)
-    
-    # Баним в группах
-    for gid in [GROUP_REQUESTS, GROUP_RULES, GROUP_MAIN]:
-        try:
-            await bot.ban_chat_member(gid, target_id)
-        except:
-            pass
-    
-    await message.answer(f"✅ Пользователь {target_id} забанен!\nПричина: {reason}")
-    await bot.send_message(ADMIN_GROUP, f"🔨 @{message.from_user.username} забанил {target_id}\nПричина: {reason}")
+@dp.message(Command("start"), F.chat.type.in_([ChatType.GROUP, ChatType.SUPERGROUP]))
+async def start_group(message: types.Message):
+    pass
 
-@dp.message(Command("unban"))
-async def cmd_unban(message: types.Message):
-    uid = message.from_user.id
-    if get_admin_level(uid) < 1:
-        await message.answer("⛔ Нет прав!")
+# ════════════ АДМИН-ПАНЕЛЬ ════════════
+@dp.callback_query(F.data == "apanel")
+async def admin_panel(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ Нет прав!")
         return
-    
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("❌ Формат: /unban ID\nНапример: /unban 123456789")
-        return
-    
-    target_id = int(parts[1])
-    unban_user(target_id)
-    
-    # Разбаниваем в группах
-    for gid in [GROUP_REQUESTS, GROUP_RULES, GROUP_MAIN]:
-        try:
-            await bot.unban_chat_member(gid, target_id)
-        except:
-            pass
-    
-    await message.answer(f"✅ Пользователь {target_id} разбанен!")
-    await bot.send_message(ADMIN_GROUP, f"✅ @{message.from_user.username} разбанил {target_id}")
+    await callback.message.edit_text("👑 АДМИН-ПАНЕЛЬ\n\nВыберите раздел:", reply_markup=admin_panel_kb())
+    await callback.answer()
 
-@dp.message(Command("BOTBBSI"))
-async def cmd_promote_admin(message: types.Message):
-    """Повышение до админа после обзвона. Только старший админ (уровень 2+)."""
-    uid = message.from_user.id
-    if get_admin_level(uid) < 2:
-        await message.answer("⛔ Только старшие админы могут повышать!")
-        return
-    
-    parts = message.text.split()
-    if len(parts) < 3:
-        await message.answer("❌ Формат: /BOTBBSI ID уровень\nУровни: 1-младший, 2-старший\nПример: /BOTBBSI 123456789 1")
-        return
-    
-    target_id = int(parts[1])
-    level = int(parts[2])
-    
-    if level not in [1, 2]:
-        await message.answer("❌ Уровень должен быть 1 или 2!")
-        return
-    
-    ADMIN_LEVELS[target_id] = level
-    update_user(target_id, admin_level=level)
-    
-    await message.answer(f"✅ Пользователь {target_id} повышен до админа уровня {level}!")
-    await bot.send_message(target_id, f"🎉 ПОЗДРАВЛЯЕМ!\n\nВы стали администратором уровня {level}!\n\nДоступные команды:\n/ban - забанить\n/unban - разбанить\n/warnings - предупреждения")
-    await bot.send_message(ADMIN_GROUP, f"👑 @{message.from_user.username} повысил {target_id} до админа уровня {level}")
+@dp.callback_query(F.data == "back_main")
+async def back_main(callback: types.CallbackQuery):
+    await callback.message.edit_text("👋 Главное меню:", reply_markup=main_kb())
+    await callback.answer()
 
-@dp.message(Command("demote"))
-async def cmd_demote(message: types.Message):
-    """Понижение админа. Только верховный (уровень 3)."""
-    uid = message.from_user.id
-    if get_admin_level(uid) < 3:
-        await message.answer("⛔ Только Верховный Админ может понижать!")
+@dp.callback_query(F.data == "apanel_requests")
+async def panel_requests(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ Нет прав!")
+        return
+    conn = sqlite3.connect('empire.db')
+    c = conn.cursor()
+    c.execute("SELECT user_id, full_name, country, city, status FROM users WHERE status IN ('pending', 'on_hold') ORDER BY rowid DESC LIMIT 10")
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        await callback.message.edit_text("📥 Нет активных заявок.", reply_markup=back_kb())
         return
     
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("❌ Формат: /demote ID")
-        return
+    txt = "📥 АКТИВНЫЕ ЗАЯВКИ:\n\n"
+    kb = []
+    for r in rows:
+        txt += f"🆔 {r[0]} | {r[1]} | {r[3]}\n"
+        kb.append([InlineKeyboardButton(text=f"📋 {r[1]}", callback_data=f"info_{r[0]}")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="apanel")])
     
-    target_id = int(parts[1])
-    if target_id == SUPREME_ADMIN:
-        await message.answer("❌ Нельзя понизить Верховного Админа!")
-        return
-    
-    ADMIN_LEVELS.pop(target_id, None)
-    update_user(target_id, admin_level=0)
-    
-    await message.answer(f"✅ Админ {target_id} понижен!")
-    await bot.send_message(target_id, "⚠️ Вы были понижены. Админ-права отозваны.")
+    await callback.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback.answer()
 
-@dp.message(Command("admins"))
-async def cmd_admins(message: types.Message):
-    """Список всех админов."""
-    if not ADMIN_LEVELS:
-        await message.answer("Нет админов.")
+@dp.callback_query(F.data == "apanel_users")
+async def panel_users(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ Нет прав!")
+        return
+    conn = sqlite3.connect('empire.db')
+    c = conn.cursor()
+    c.execute("SELECT user_id, full_name, status FROM users WHERE status='approved' LIMIT 20")
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        await callback.message.edit_text("👤 Нет пользователей.", reply_markup=back_kb())
         return
     
-    txt = "👑 СПИСОК АДМИНОВ:\n\n"
-    for aid, level in ADMIN_LEVELS.items():
-        lvl_name = {1: "Младший", 2: "Старший", 3: "Верховный"}
-        txt += f"🆔 {aid} — {lvl_name.get(level, 'Неизвестно')}\n"
+    txt = "👤 ПОЛЬЗОВАТЕЛИ:\n\n"
+    for r in rows:
+        txt += f"🆔 {r[0]} | {r[1]} | ✅\n"
     
-    await message.answer(txt)
+    await callback.message.edit_text(txt, reply_markup=back_kb())
+    await callback.answer()
 
-@dp.message(Command("warnings"))
-async def cmd_warnings(message: types.Message):
-    """Проверить предупреждения пользователя."""
-    uid = message.from_user.id
-    if get_admin_level(uid) < 1:
-        # Обычный пользователь смотрит свои
-        w = get_warnings(message.from_user.id)
-        await message.answer(f"⚠️ Ваши предупреждения: {w}/3\nПри 3 = БАН")
+@dp.callback_query(F.data == "apanel_stats")
+async def panel_stats(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ Нет прав!")
         return
+    conn = sqlite3.connect('empire.db')
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    total = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE status='pending'")
+    pending = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE status='approved'")
+    approved = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE banned=1")
+    banned = c.fetchone()[0]
+    conn.close()
     
-    parts = message.text.split()
-    target_id = int(parts[1]) if len(parts) > 1 else message.from_user.id
-    w = get_warnings(target_id)
-    await message.answer(f"⚠️ Предупреждения пользователя {target_id}: {w}/3")
-
-@dp.message(Command("autoban"))
-async def cmd_autoban(message: types.Message):
-    """Включить/выключить авто-бан. Только верховный."""
-    global AUTO_BAN
-    uid = message.from_user.id
-    if get_admin_level(uid) < 3:
-        await message.answer("⛔ Только Верховный Админ!")
-        return
+    txt = (f"📊 СТАТИСТИКА\n\n"
+           f"👥 Всего: {total}\n"
+           f"📥 Заявок: {pending}\n"
+           f"✅ В чате: {approved}\n"
+           f"🔨 Забанено: {banned}")
     
-    AUTO_BAN = not AUTO_BAN
-    status = "ВКЛЮЧЕН" if AUTO_BAN else "ВЫКЛЮЧЕН"
-    await message.answer(f"🤖 Авто-бан: {status}")
-    await bot.send_message(ADMIN_GROUP, f"⚙️ Верховный Админ изменил режим банов:\nАвто-бан: {status}")
+    await callback.message.edit_text(txt, reply_markup=back_kb())
+    await callback.answer()
 
 # ════════════ РЕГИСТРАЦИЯ ════════════
+class Reg(StatesGroup):
+    fio = State()
+    birth = State()
+    phone = State()
+    country = State()
+    city = State()
+    gender = State()
+
 @dp.callback_query(F.data == "apply")
 async def apply_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("📝 РЕГИСТРАЦИЯ\n\nШаг 1/6 — Введите ПОЛНОЕ ФИО:")
+    await callback.message.edit_text("📝 Шаг 1/6 — Введите ПОЛНОЕ ФИО (Фамилия Имя Отчество):")
     await state.set_state(Reg.fio)
     await callback.answer()
 
 @dp.message(Reg.fio)
-async def step_fio(message: types.Message, state: FSMContext):
+async def s_fio(message: types.Message, state: FSMContext):
     if len(message.text.split()) < 2:
         await message.answer("❌ Минимум Фамилия и Имя:")
         return
@@ -412,225 +261,158 @@ async def step_fio(message: types.Message, state: FSMContext):
     await state.set_state(Reg.birth)
 
 @dp.message(Reg.birth)
-async def step_birth(message: types.Message, state: FSMContext):
+async def s_birth(message: types.Message, state: FSMContext):
     if not re.match(r'^\d{2}\.\d{2}\.\d{4}$', message.text.strip()):
-        await message.answer("❌ Формат: ДД.ММ.ГГГГ")
+        await message.answer("❌ ДД.ММ.ГГГГ:")
         return
     await state.update_data(birth=message.text.strip())
     await message.answer("✅ Шаг 3/6 — Телефон:")
     await state.set_state(Reg.phone)
 
 @dp.message(Reg.phone)
-async def step_phone(message: types.Message, state: FSMContext):
-    p = message.text.strip().replace(' ','').replace('-','')
-    if len(p) < 10:
-        await message.answer("❌ Неверный формат:")
-        return
+async def s_phone(message: types.Message, state: FSMContext):
     await state.update_data(phone=message.text.strip())
     await message.answer("✅ Шаг 4/6 — Страна:")
     await state.set_state(Reg.country)
 
 @dp.message(Reg.country)
-async def step_country(message: types.Message, state: FSMContext):
+async def s_country(message: types.Message, state: FSMContext):
     await state.update_data(country=message.text.strip())
     await message.answer("✅ Шаг 5/6 — Город:")
     await state.set_state(Reg.city)
 
 @dp.message(Reg.city)
-async def step_city(message: types.Message, state: FSMContext):
+async def s_city(message: types.Message, state: FSMContext):
     await state.update_data(city=message.text.strip())
-    await message.answer("✅ Шаг 6/6 — Пол:", reply_markup=gender_kb())
+    await message.answer("✅ Шаг 6/6 — Выберите пол:", reply_markup=gender_kb())
     await state.set_state(Reg.gender)
 
 @dp.message(Reg.gender)
-async def step_gender(message: types.Message, state: FSMContext):
+async def s_gender(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     d = await state.get_data()
+    uname = message.from_user.username or "нет"
+    
     update_user(uid, full_name=d['fio'], birth_date=d['birth'], phone=d['phone'],
                 country=d['country'], city=d['city'], gender=message.text.strip(), status="pending")
-    txt = (f"📥 ЗАЯВКА\n\n👤 {d['fio']}\n🎂 {d['birth']}\n📞 {d['phone']}\n"
+    
+    txt = (f"📥 ЗАЯВКА #{uid}\n\n"
+           f"👤 {d['fio']}\n🎂 {d['birth']}\n📞 {d['phone']}\n"
            f"🌍 {d['country']}, {d['city']}\n⚧ {message.text.strip()}\n"
-           f"🆔 {uid}\n📛 @{message.from_user.username}")
-    await bot.send_message(GROUP_REQUESTS, txt, reply_markup=admin_kb(uid))
-    await bot.send_message(ADMIN_GROUP, txt)
-    await message.answer(f"✅ ГОТОВО!\n\n{txt}\n\nОжидайте решения.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📜 Правила", callback_data="rules")]]))
+           f"🆔 {uid}\n📛 @{uname}")
+    
+    await bot.send_message(GROUP_REQUESTS, txt, reply_markup=request_buttons(uid))
+    await bot.send_message(ADMIN_GROUP, f"📥 Заявка #{uid}\n{d['fio']}", reply_markup=request_buttons(uid))
+    
+    await message.answer("✅ ЗАЯВКА ОТПРАВЛЕНА!\n\nОжидайте решения.", reply_markup=rules_kb())
     await state.clear()
 
-# ════════════ АДМИН-КНОПКИ ЗАЯВОК ════════════
+# ════════════ КНОПКИ УПРАВЛЕНИЯ ════════════
 @dp.callback_query(F.data.startswith("acc_"))
-async def admin_acc(callback: types.CallbackQuery):
-    if get_admin_level(callback.from_user.id) < 1:
-        await callback.answer("⛔ Нет прав!")
-        return
+async def btn_accept(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
     uid = int(callback.data.split("_")[1])
     try:
         link = await bot.create_chat_invite_link(GROUP_RULES, member_limit=1)
-        await bot.send_message(uid, f"✅ ВЫ ПРИНЯТЫ В ГРУППУ ПРАВИЛ\n{link.invite_link}\n\nИзучите Кодекс и примите все статьи.")
+        await bot.send_message(uid, f"✅ ПРИНЯТ В BBSI ПРАВИЛА\n\n{link.invite_link}\n\n📜 Примите УК:", reply_markup=rules_kb())
         update_user(uid, status="rules")
-        await callback.message.edit_text(callback.message.text + "\n\n✅ В ПРАВИЛАХ")
-    except Exception as e:
-        await callback.answer(str(e))
+        await callback.message.edit_text(callback.message.text + "\n\n✅ ПРИНЯТ В ПРАВИЛА")
+    except Exception as e: await callback.answer(str(e))
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("main_"))
-async def admin_main(callback: types.CallbackQuery):
-    if get_admin_level(callback.from_user.id) < 1:
-        await callback.answer("⛔ Нет прав!")
-        return
+@dp.callback_query(F.data.startswith("direct_"))
+async def btn_direct(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
     uid = int(callback.data.split("_")[1])
-    u = get_user(uid)
-    if not u or u[10] != 1:
-        await callback.answer("❌ Не принял правила!")
-        return
     try:
         link = await bot.create_chat_invite_link(GROUP_MAIN, member_limit=1)
-        await bot.send_message(uid, f"🎉 ВЫ В ОСНОВНОЙ ГРУППЕ!\n{link.invite_link}\n\n⚖️ УК действует!")
+        await bot.send_message(uid, f"🎉 ВЫ В BBSI ЧАТ!\n\n{link.invite_link}\n\n⚖️ УК действует!")
         update_user(uid, status="approved")
-        await callback.message.edit_text(callback.message.text + "\n\n✅ В ОСНОВНОЙ")
-    except Exception as e:
-        await callback.answer(str(e))
+        await callback.message.edit_text(callback.message.text + "\n\n⭐ В ЧАТЕ")
+    except Exception as e: await callback.answer(str(e))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("hold_"))
+async def btn_hold(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
+    uid = int(callback.data.split("_")[1])
+    update_user(uid, status="on_hold")
+    await bot.send_message(uid, "⏳ Ваша заявка на рассмотрении.")
+    await callback.message.edit_text(callback.message.text + "\n\n⏳ ОТЛОЖЕНО")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("rej_"))
-async def admin_rej(callback: types.CallbackQuery):
-    if get_admin_level(callback.from_user.id) < 1:
-        await callback.answer("⛔ Нет прав!")
-        return
+async def btn_reject(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
     uid = int(callback.data.split("_")[1])
     await bot.send_message(uid, "❌ Заявка отклонена.")
     update_user(uid, status="rejected")
     await callback.message.edit_text(callback.message.text + "\n\n❌ ОТКЛОНЁН")
     await callback.answer()
 
-# ════════════ ПРАВИЛА ════════════
+@dp.callback_query(F.data.startswith("info_"))
+async def btn_info(callback: types.CallbackQuery):
+    uid = int(callback.data.split("_")[1])
+    user = get_user(uid)
+    if user:
+        age = "?"
+        if user[3]:
+            try:
+                d = datetime.strptime(user[3], "%d.%m.%Y")
+                age = datetime.now().year - d.year
+            except: pass
+        txt = (f"📋 АНКЕТА #{uid}\n\n"
+               f"👤 {user[2]}\n🎂 {user[3]} ({age} лет)\n📞 {user[4]}\n"
+               f"🌍 {user[5]}, {user[6]}\n⚧ {user[7]}\n"
+               f"📊 Статус: {user[8]}\n⚠️ Предупреждений: {user[9]}")
+        await callback.message.answer(txt)
+    await callback.answer()
+
+# ════════════ ПРИНЯТИЕ УК ════════════
 @dp.callback_query(F.data == "rules")
 async def show_rules(callback: types.CallbackQuery):
-    await callback.message.edit_text(RULES_TEXT, reply_markup=rules_kb())
+    await callback.message.edit_text("📜 УК BBSI — 80 статей\n\n12.3 Скриншот → бан\n17.8 Пересылка → $5000\n23.1 Запись → вечный бан", reply_markup=rules_kb())
     await callback.answer()
 
 @dp.callback_query(F.data == "accept_rules")
 async def accept_rules(callback: types.CallbackQuery):
     uid = callback.from_user.id
     update_user(uid, rules_accepted=1)
-    await callback.message.edit_text("✅ ВСЕ 80 СТАТЕЙ ПРИНЯТЫ!\n\n⚖️ Вы под юрисдикцией Суда.\nОжидайте одобрения.")
-    await bot.send_message(ADMIN_GROUP, f"✅ @{callback.from_user.username} принял статьи!")
+    await callback.message.edit_text("✅ ВСЕ 80 СТАТЕЙ ПРИНЯТЫ!\nОжидайте одобрения в чат.")
+    await bot.send_message(ADMIN_GROUP, f"✅ @{callback.from_user.username} принял УК!", reply_markup=admin_approve_buttons(uid))
     await callback.answer()
 
-# ════════════ ЗАЩИТА ОТ НАРУШЕНИЙ ════════════
-@dp.message(F.forward_from | F.forward_from_chat)
-async def detect_forward(message: types.Message):
-    """Обнаружение пересылки"""
-    uid = message.from_user.id
-    w = add_violation(uid, "forward", "17.8", message.chat.id)
-    
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    if AUTO_BAN and w >= 3:
-        await execute_ban(uid, "Пересылка (3 нарушения)")
-        return
-    
-    # Отправляем админам
-    await bot.send_message(
-        ADMIN_GROUP,
-        f"🚨 ПЕРЕСЫЛКА!\n👤 @{message.from_user.username} (ID:{uid})\n"
-        f"📜 Статья 17.8\n⚠️ Нарушений: {w}/3\n"
-        f"🤖 Авто-бан: {'ВКЛ' if AUTO_BAN else 'ВЫКЛ'}",
-        reply_markup=violation_kb(uid, "forward")
-    )
-    
-    warn_msg = await message.answer(f"🚫 @{message.from_user.username} — ПЕРЕСЫЛКА ЗАПРЕЩЕНА!\nНарушение {w}/3")
-    await asyncio.sleep(10)
-    try:
-        await warn_msg.delete()
-    except:
-        pass
-
-async def execute_ban(uid, reason):
-    """Выполнить бан пользователя"""
-    ban_user(uid, reason, 0)
-    for gid in [GROUP_REQUESTS, GROUP_RULES, GROUP_MAIN]:
-        try:
-            await bot.ban_chat_member(gid, uid)
-        except:
-            pass
-    await bot.send_message(uid, f"⛔ ВЫ ЗАБАНЕНЫ!\nПричина: {reason}")
-    await bot.send_message(ADMIN_GROUP, f"🔨 АВТО-БАН: {uid}\nПричина: {reason}")
-
-# ════════════ ОБРАБОТКА КНОПОК АДМИНА ════════════
-@dp.callback_query(F.data.startswith("vban_"))
-async def violation_ban(callback: types.CallbackQuery):
-    if get_admin_level(callback.from_user.id) < 1:
-        await callback.answer("⛔ Нет прав!")
-        return
-    parts = callback.data.split("_")
-    uid = int(parts[1])
-    vtype = parts[2]
-    await execute_ban(uid, f"Нарушение: {vtype}")
-    await callback.message.edit_text(callback.message.text + f"\n\n🔨 ЗАБАНЕН админом @{callback.from_user.username}")
-    await callback.answer("✅ Забанен!")
-
-@dp.callback_query(F.data.startswith("vwarn_"))
-async def violation_warn(callback: types.CallbackQuery):
-    if get_admin_level(callback.from_user.id) < 1:
-        await callback.answer("⛔ Нет прав!")
-        return
-    parts = callback.data.split("_")
-    uid = int(parts[1])
-    w = get_warnings(uid)
-    await bot.send_message(uid, f"⚠️ ПРЕДУПРЕЖДЕНИЕ {w}/3\nПри 3 нарушениях — БАН.")
-    await callback.message.edit_text(callback.message.text + f"\n\n⚠️ Предупреждён админом @{callback.from_user.username}")
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("vignore_"))
-async def violation_ignore(callback: types.CallbackQuery):
-    await callback.message.edit_text(callback.message.text + "\n\n👀 Игнорировано")
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("vstats_"))
-async def violation_stats(callback: types.CallbackQuery):
+# ════════════ ОДОБРЕНИЕ В ЧАТ ════════════
+@dp.callback_query(F.data.startswith("appr_"))
+async def btn_approve(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
     uid = int(callback.data.split("_")[1])
-    w = get_warnings(uid)
-    user = get_user(uid)
-    await callback.answer(f"📊 ID:{uid} | Нарушений: {w}/3 | Статус: {user[5] if user else '?'}", show_alert=True)
-
-# ════════════ ЯЗЫКИ ════════════
-@dp.callback_query(F.data == "lang")
-async def show_lang(callback: types.CallbackQuery):
-    await callback.message.edit_text("🌐 ВЫБЕРИТЕ ЯЗЫК:", reply_markup=lang_kb())
+    try:
+        link = await bot.create_chat_invite_link(GROUP_MAIN, member_limit=1)
+        await bot.send_message(uid, f"🎉 ВЫ В BBSI ЧАТ!\n\n{link.invite_link}")
+        update_user(uid, status="approved")
+        await callback.message.edit_text(callback.message.text + "\n\n✅ В ЧАТЕ")
+    except Exception as e: await callback.answer(str(e))
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("langpg_"))
-async def lang_page(callback: types.CallbackQuery):
-    page = int(callback.data.split("_")[1])
-    await callback.message.edit_text("🌐 ЯЗЫК:", reply_markup=lang_kb(page))
+@dp.callback_query(F.data.startswith("wait_"))
+async def btn_wait(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
+    await callback.message.edit_text(callback.message.text + "\n\n⏳ ОЖИДАЕТ")
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("setlang_"))
-async def set_lang(callback: types.CallbackQuery):
-    lang = callback.data.split("_")[1]
-    update_user(callback.from_user.id, language=lang)
-    await callback.message.edit_text(f"✅ Язык: {ALL_LANGUAGES.get(lang, lang)}\n/start — меню")
-    await callback.answer()
-
-@dp.callback_query(F.data == "back")
-async def back_main(callback: types.CallbackQuery):
-    await callback.message.edit_text("👋 Главное меню:", reply_markup=main_kb())
-    await callback.answer()
-
-@dp.callback_query(F.data == "noop")
-async def noop(callback: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("deny_"))
+async def btn_deny(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
+    uid = int(callback.data.split("_")[1])
+    await bot.send_message(uid, "❌ Отказано.")
+    update_user(uid, status="denied")
+    await callback.message.edit_text(callback.message.text + "\n\n❌ ОТКАЗАНО")
     await callback.answer()
 
 # ════════════ ЗАПУСК ════════════
 async def main():
     init_db()
-    print("🤖 БОТ ЗАПУЩЕН!")
-    print(f"👑 Верховный Админ: {SUPREME_ADMIN}")
-    print(f"🤖 Авто-бан: {'ВКЛЮЧЕН' if AUTO_BAN else 'ВЫКЛЮЧЕН (ручной режим)'}")
-    print(f"⚖️ УК активирован")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
