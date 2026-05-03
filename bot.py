@@ -32,6 +32,11 @@ def init_db():
         gender TEXT, status TEXT DEFAULT 'new', rules_accepted INTEGER DEFAULT 0,
         warnings INTEGER DEFAULT 0, banned INTEGER DEFAULT 0, ban_reason TEXT
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS violations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER, type TEXT, article TEXT,
+        chat_id INTEGER, timestamp TEXT
+    )''')
     conn.commit()
     conn.close()
 
@@ -66,6 +71,24 @@ def is_banned(uid):
     r = c.fetchone()
     conn.close()
     return r and r[0] == 1
+
+def add_violation(uid, vtype, article, chat_id):
+    conn = sqlite3.connect('empire.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO violations (user_id, type, article, chat_id, timestamp) VALUES (?, ?, ?, ?, ?)",
+              (uid, vtype, article, chat_id, datetime.now().isoformat()))
+    c.execute("UPDATE users SET warnings = warnings + 1 WHERE user_id=?", (uid,))
+    conn.commit()
+    conn.close()
+    return get_warnings(uid)
+
+def get_warnings(uid):
+    conn = sqlite3.connect('empire.db')
+    c = conn.cursor()
+    c.execute("SELECT warnings FROM users WHERE user_id=?", (uid,))
+    r = c.fetchone()
+    conn.close()
+    return r[0] if r else 0
 
 def get_pending_count():
     conn = sqlite3.connect('empire.db')
@@ -108,6 +131,15 @@ def request_buttons(uid):
         ]
     ])
 
+def violation_buttons(uid, vtype):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔨 БАН", callback_data=f"vban_{uid}_{vtype}"),
+            InlineKeyboardButton(text="⚠️ ПРЕДУПРЕДИТЬ", callback_data=f"vwarn_{uid}_{vtype}")
+        ],
+        [InlineKeyboardButton(text="👀 ИГНОРИРОВАТЬ", callback_data=f"vignore_{uid}")]
+    ])
+
 def admin_approve_buttons(uid):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⭐ ОДОБРИТЬ В ЧАТ", callback_data=f"appr_{uid}")],
@@ -133,6 +165,86 @@ def back_kb():
         [InlineKeyboardButton(text="🔙 Назад", callback_data="apanel")],
     ])
 
+# ════════════ ЗАЩИТА: ПЕРЕСЫЛКА ════════════
+@dp.message(F.forward_from | F.forward_from_chat)
+async def detect_forward(message: types.Message):
+    uid = message.from_user.id
+    w = add_violation(uid, "forward", "17.8", message.chat.id)
+    
+    try:
+        await message.delete()
+    except:
+        pass
+    
+    warn = await message.answer(
+        f"🚫 @{message.from_user.username} — ПЕРЕСЫЛКА ЗАПРЕЩЕНА!\n"
+        f"⚖️ Статья 17.8\n⚠️ Нарушение {w}/3"
+    )
+    
+    await bot.send_message(
+        ADMIN_GROUP,
+        f"🚨 ПЕРЕСЫЛКА!\n👤 @{message.from_user.username} (ID:{uid})\n"
+        f"📍 Чат: {message.chat.id}\n⚠️ {w}/3",
+        reply_markup=violation_buttons(uid, "forward")
+    )
+    
+    await asyncio.sleep(10)
+    try:
+        await warn.delete()
+    except:
+        pass
+
+# ════════════ ЗАЩИТА: СКРИНШОТ (ФОТО БЕЗ ПОДПИСИ) ════════════
+@dp.message(F.photo, F.chat.id.in_([GROUP_MAIN, GROUP_RULES]))
+async def detect_screenshot(message: types.Message):
+    uid = message.from_user.id
+    
+    # Проверяем подозрительные фото (без подписи или с подозрительной подписью)
+    caption = (message.caption or "").lower()
+    suspicious = ["скрин", "screenshot", "screen", "снимок", "переписка"]
+    
+    if not caption or any(s in caption for s in suspicious):
+        w = add_violation(uid, "screenshot", "12.3", message.chat.id)
+        
+        await bot.send_message(
+            ADMIN_GROUP,
+            f"📸 ПОДОЗРЕНИЕ НА СКРИНШОТ!\n👤 @{message.from_user.username} (ID:{uid})\n"
+            f"📍 Чат: {message.chat.id}\n📝 Подпись: {caption or 'нет'}\n⚠️ {w}/3",
+            reply_markup=violation_buttons(uid, "screenshot")
+        )
+
+# ════════════ ОБРАБОТКА КНОПОК НАРУШЕНИЙ ════════════
+@dp.callback_query(F.data.startswith("vban_"))
+async def v_ban(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
+    parts = callback.data.split("_")
+    uid = int(parts[1])
+    vtype = parts[2]
+    
+    for gid in [GROUP_REQUESTS, GROUP_RULES, GROUP_MAIN]:
+        try:
+            await bot.ban_chat_member(gid, uid)
+        except: pass
+    
+    update_user(uid, banned=1, ban_reason=vtype)
+    await bot.send_message(uid, f"⛔ ВЫ ЗАБАНЕНЫ!\nПричина: {vtype}")
+    await callback.message.edit_text(callback.message.text + f"\n\n🔨 ЗАБАНЕН ({vtype})")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("vwarn_"))
+async def v_warn(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
+    uid = int(callback.data.split("_")[1])
+    w = get_warnings(uid)
+    await bot.send_message(uid, f"⚠️ ПРЕДУПРЕЖДЕНИЕ {w}/3\nПри 3 — БАН.")
+    await callback.message.edit_text(callback.message.text + "\n\n⚠️ ПРЕДУПРЕЖДЁН")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("vignore_"))
+async def v_ignore(callback: types.CallbackQuery):
+    await callback.message.edit_text(callback.message.text + "\n\n👀 ИГНОРИРОВАНО")
+    await callback.answer()
+
 # ════════════ /start ТОЛЬКО В ЛИЧКЕ ════════════
 @dp.message(Command("start"), F.chat.type == ChatType.PRIVATE)
 async def start_cmd(message: types.Message):
@@ -152,9 +264,7 @@ async def start_group(message: types.Message):
 # ════════════ АДМИН-ПАНЕЛЬ ════════════
 @dp.callback_query(F.data == "apanel")
 async def admin_panel(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("⛔ Нет прав!")
-        return
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
     await callback.message.edit_text("👑 АДМИН-ПАНЕЛЬ\n\nВыберите раздел:", reply_markup=admin_panel_kb())
     await callback.answer()
 
@@ -165,20 +275,18 @@ async def back_main(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "apanel_requests")
 async def panel_requests(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("⛔ Нет прав!")
-        return
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
     conn = sqlite3.connect('empire.db')
     c = conn.cursor()
-    c.execute("SELECT user_id, full_name, country, city, status FROM users WHERE status IN ('pending', 'on_hold') ORDER BY rowid DESC LIMIT 10")
+    c.execute("SELECT user_id, full_name, country, city FROM users WHERE status IN ('pending', 'on_hold') LIMIT 10")
     rows = c.fetchall()
     conn.close()
     
     if not rows:
-        await callback.message.edit_text("📥 Нет активных заявок.", reply_markup=back_kb())
+        await callback.message.edit_text("📥 Нет заявок.", reply_markup=back_kb())
         return
     
-    txt = "📥 АКТИВНЫЕ ЗАЯВКИ:\n\n"
+    txt = "📥 ЗАЯВКИ:\n\n"
     kb = []
     for r in rows:
         txt += f"🆔 {r[0]} | {r[1]} | {r[3]}\n"
@@ -190,12 +298,10 @@ async def panel_requests(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "apanel_users")
 async def panel_users(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("⛔ Нет прав!")
-        return
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
     conn = sqlite3.connect('empire.db')
     c = conn.cursor()
-    c.execute("SELECT user_id, full_name, status FROM users WHERE status='approved' LIMIT 20")
+    c.execute("SELECT user_id, full_name FROM users WHERE status='approved' LIMIT 20")
     rows = c.fetchall()
     conn.close()
     
@@ -203,18 +309,36 @@ async def panel_users(callback: types.CallbackQuery):
         await callback.message.edit_text("👤 Нет пользователей.", reply_markup=back_kb())
         return
     
-    txt = "👤 ПОЛЬЗОВАТЕЛИ:\n\n"
+    txt = "👤 В ЧАТЕ:\n\n"
     for r in rows:
-        txt += f"🆔 {r[0]} | {r[1]} | ✅\n"
+        txt += f"🆔 {r[0]} | {r[1]}\n"
+    
+    await callback.message.edit_text(txt, reply_markup=back_kb())
+    await callback.answer()
+
+@dp.callback_query(F.data == "apanel_banned")
+async def panel_banned(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
+    conn = sqlite3.connect('empire.db')
+    c = conn.cursor()
+    c.execute("SELECT user_id, full_name, ban_reason FROM users WHERE banned=1")
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        await callback.message.edit_text("🔨 Нет забаненных.", reply_markup=back_kb())
+        return
+    
+    txt = "🔨 ЗАБАНЕНЫ:\n\n"
+    for r in rows:
+        txt += f"🆔 {r[0]} | {r[1]} | {r[2]}\n"
     
     await callback.message.edit_text(txt, reply_markup=back_kb())
     await callback.answer()
 
 @dp.callback_query(F.data == "apanel_stats")
 async def panel_stats(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("⛔ Нет прав!")
-        return
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
     conn = sqlite3.connect('empire.db')
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users")
@@ -225,13 +349,16 @@ async def panel_stats(callback: types.CallbackQuery):
     approved = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM users WHERE banned=1")
     banned = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM violations")
+    viols = c.fetchone()[0]
     conn.close()
     
     txt = (f"📊 СТАТИСТИКА\n\n"
            f"👥 Всего: {total}\n"
            f"📥 Заявок: {pending}\n"
            f"✅ В чате: {approved}\n"
-           f"🔨 Забанено: {banned}")
+           f"🔨 Забанено: {banned}\n"
+           f"⚠️ Нарушений: {viols}")
     
     await callback.message.edit_text(txt, reply_markup=back_kb())
     await callback.answer()
@@ -247,7 +374,7 @@ class Reg(StatesGroup):
 
 @dp.callback_query(F.data == "apply")
 async def apply_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("📝 Шаг 1/6 — Введите ПОЛНОЕ ФИО (Фамилия Имя Отчество):")
+    await callback.message.edit_text("📝 Шаг 1/6 — Введите ПОЛНОЕ ФИО:")
     await state.set_state(Reg.fio)
     await callback.answer()
 
@@ -284,7 +411,7 @@ async def s_country(message: types.Message, state: FSMContext):
 @dp.message(Reg.city)
 async def s_city(message: types.Message, state: FSMContext):
     await state.update_data(city=message.text.strip())
-    await message.answer("✅ Шаг 6/6 — Выберите пол:", reply_markup=gender_kb())
+    await message.answer("✅ Шаг 6/6 — Пол:", reply_markup=gender_kb())
     await state.set_state(Reg.gender)
 
 @dp.message(Reg.gender)
@@ -337,7 +464,7 @@ async def btn_hold(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔")
     uid = int(callback.data.split("_")[1])
     update_user(uid, status="on_hold")
-    await bot.send_message(uid, "⏳ Ваша заявка на рассмотрении.")
+    await bot.send_message(uid, "⏳ Заявка на рассмотрении.")
     await callback.message.edit_text(callback.message.text + "\n\n⏳ ОТЛОЖЕНО")
     await callback.answer()
 
